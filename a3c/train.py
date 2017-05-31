@@ -8,11 +8,7 @@ import numpy as np
 import h5py
 import argparse
 import ppaquette_gym_super_mario
-from keras.models import Model
-from keras.layers import Input, Convolution2D, Flatten, Dense
-from keras.layers.advanced_activations import ELU
-from keras.layers.recurrent import LSTM
-from keras import backend as K
+from model import build_network
 import noreward_models as nm
 
 parser = argparse.ArgumentParser(description='Training model')
@@ -38,43 +34,15 @@ input_depth = 1
 past_range = 3
 observation_shape = (input_depth * past_range,) + screen
 
-def build_network(input_shape, output_shape):
-    state = Input(shape=input_shape)
-    h = Convolution2D(32, 3, 3, border_mode='same',
-                      subsample=(2, 2), dim_ordering='th')(state)
-    h = ELU(alpha=1.0)(h)
-    h = Convolution2D(32, 3, 3, border_mode='same',
-                      subsample=(2, 2), dim_ordering='th')(h)
-    h = ELU(alpha=1.0)(h)
-    h = Convolution2D(32, 3, 3, border_mode='same',
-                      subsample=(2, 2), dim_ordering='th')(h)
-    h = ELU(alpha=1.0)(h)
-    h = Convolution2D(32, 3, 3, border_mode='same',
-                      subsample=(2, 2), dim_ordering='th')(h)
-    h = ELU(alpha=1.0)(h)
-    h = Flatten()(h)
-
-    value = Dense(256, activation='relu')(h)
-    value = Dense(1, activation='linear', name='value')(value)
-    policy = Dense(output_shape, activation='sigmoid', name='policy')(h)
-
-    value_network = Model(input=state, output=value)
-    policy_network = Model(input=state, output=policy)
-
-    adventage = Input(shape=(1,))
-    train_network = Model(input=[state, adventage], output=[value, policy])
-
-    return value_network, policy_network, train_network, adventage
-
-
 def policy_loss(adventage=0., beta=0.01):
+    from keras import backend as K
     def loss(y_true, y_pred):
         return -K.sum(K.log(K.sum(y_true * y_pred, axis=-1) + K.epsilon()) * K.flatten(adventage)) + \
                beta * K.sum(y_pred * K.log(y_pred + K.epsilon()))
     return loss
 
-
 def value_loss():
+    from keras import backend as K
     def loss(y_true, y_pred):
         return 0.5 * K.sum(K.square(y_true - y_pred))
     return loss
@@ -82,8 +50,6 @@ def value_loss():
 class LearningAgent(object):
     def __init__(self, action_space, batch_size=32, swap_freq=200):
         from keras.optimizers import RMSprop
-        self.batch_size = batch_size
-
         _, _, self.train_net, adventage = build_network(observation_shape,
                                                         action_space.num_discrete_space)
 
@@ -96,8 +62,8 @@ class LearningAgent(object):
         self.entropy = deque(maxlen=25)
         self.swap_freq = swap_freq
         self.swap_counter = self.swap_freq
-        self.unroll = np.arange(self.batch_size)
-        self.targets = np.zeros((self.batch_size, action_space.num_discrete_space))
+        self.unroll = np.arange(batch_size)
+        self.targets = np.zeros((batch_size, action_space.num_discrete_space))
         self.counter = 0
 
     def learn(self, last_observations, actions, rewards, learning_rate=0.001):
@@ -183,8 +149,8 @@ def learn_proc(mem_queue, weight_dict):
 class ActingAgent(object):
     def __init__(self, num_action, screen=(84, 84), n_step=8, discount=0.99):
 
-        self.value_net, self.policy_net, self.load_net, adv = build_network(observation_shape,
-                                                                            num_action)
+        self.value_net, self.policy_net, self.load_net, _ = build_network(observation_shape,
+                                                                          num_action)
 
         self.value_net.compile(optimizer='rmsprop', loss='mse')
         self.policy_net.compile(optimizer='rmsprop', loss='mse')
@@ -194,44 +160,36 @@ class ActingAgent(object):
         self.observations = np.zeros(observation_shape)
         self.last_observations = np.zeros_like(self.observations)
 
-        self.n_step_observations = deque(maxlen=n_step)
-        self.n_step_actions = deque(maxlen=n_step)
-        self.n_step_rewards = deque(maxlen=n_step)
+        self.n_step_data = deque(maxlen=n_step)
         self.n_step = n_step
         self.discount = discount
-        self.counter = 0
 
     def init_episode(self, observation):
         for _ in range(past_range):
             self.save_observation(observation)
 
     def reset(self):
-        self.counter = 0
-        self.n_step_observations.clear()
-        self.n_step_actions.clear()
-        self.n_step_rewards.clear()
+        self.n_step_data.clear()
 
     def sars_data(self, action, reward, observation, terminal, mem_queue):
         self.save_observation(observation)
         reward = np.clip(reward, -1., 1.)
         # reward /= args.reward_scale
 
-        self.n_step_observations.appendleft(self.last_observations)
-        self.n_step_actions.appendleft(action)
-        self.n_step_rewards.appendleft(reward)
+        self.n_step_data.appendleft([self.last_observations,
+                                     action, reward])
 
-        self.counter += 1
-        if terminal or self.counter >= self.n_step:
+        if terminal or len(self.n_step_data) >= self.n_step:
             r = 0.
             if not terminal:
                 r = self.value_net.predict(self.observations[None, ...])[0]
-            for i in range(self.counter):
-                r = self.n_step_rewards[i] + self.discount * r
-                mem_queue.put((self.n_step_observations[i], self.n_step_actions[i], r))
+            for i in range(len(self.n_step_data)):
+                r = self.n_step_data[i][2] + self.discount * r
+                mem_queue.put((self.n_step_data[i][0], self.n_step_data[i][1], r))
             self.reset()
 
     def choose_action(self):
-        if np.random.rand(1) < 1. / ((self.counter / 50.0) + 1.0):
+        if np.random.rand(1) < 0.1:
             action = np.random.rand(self.num_action)
         else:
             action = self.policy_net.predict(self.observations[None, ...])[0]
@@ -256,7 +214,6 @@ def generate_experience_proc(mem_queue, weight_dict, no):
     frames = 0
     batch_size = args.batch_size
     env = gym.make(args.game)
-    env.reset()
     agent = ActingAgent(env.action_space.num_discrete_space, n_step=args.n_step)
 
     if frames > 0:
@@ -284,7 +241,7 @@ def generate_experience_proc(mem_queue, weight_dict, no):
             frames += 1
             action = agent.choose_action()
             observation, reward, done, _ = env.step(action)
-            env.render()
+            #env.render()
             episode_reward += reward
             best_score = max(best_score, episode_reward)
             agent.sars_data(action, reward, observation, done, mem_queue)
