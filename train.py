@@ -262,9 +262,10 @@ def generate_experience_proc(mem_queue, weight_dict, no):
                                          transform_screen(observation),
                                          np.array([action])])
             #episode_reward += reward
-            episode_reward -= r_in[0]
+            episode_reward += r_in[0]
             best_score = max(best_score, episode_reward)
-            agent.sars_data(action, reward, observation, done, mem_queue)
+            #agent.sars_data(action, reward, observation, done, mem_queue)
+            agent.sars_data(action, r_in[0], observation, done, mem_queue)
             op_count = 0 if (op_last != action).any() else op_count + 1
             done = done or op_count >= 100
             op_last = action
