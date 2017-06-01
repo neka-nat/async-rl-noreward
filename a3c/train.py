@@ -9,14 +9,14 @@ import h5py
 import argparse
 import ppaquette_gym_super_mario
 from model import build_network
-import noreward_models as nm
+from noreward_models import build_icm_model
 
 parser = argparse.ArgumentParser(description='Training model')
 parser.add_argument('--game', default='ppaquette/SuperMarioBros-1-1-v0', help='OpenAI gym environment name', dest='game', type=str)
 parser.add_argument('--processes', default=4, help='Number of processes that generate experience for agent',
                     dest='processes', type=int)
 parser.add_argument('--lr', default=0.001, help='Learning rate', dest='learning_rate', type=float)
-parser.add_argument('--steps', default=80000000, help='Number of frames to decay learning rate', dest='steps', type=int)
+parser.add_argument('--steps', default=8000000, help='Number of frames to decay learning rate', dest='steps', type=int)
 parser.add_argument('--batch_size', default=20, help='Batch size to use during training', dest='batch_size', type=int)
 parser.add_argument('--swap_freq', default=100, help='Number of frames before swapping network weights',
                     dest='swap_freq', type=int)
@@ -29,10 +29,13 @@ parser.add_argument('--n_step', default=5, help='Number of steps', dest='n_step'
 parser.add_argument('--reward_scale', default=1., dest='reward_scale', type=float)
 parser.add_argument('--beta', default=0.01, dest='beta', type=float)
 args = parser.parse_args()
-screen = (84, 84)
+screen = (42, 42)
 input_depth = 1
 past_range = 3
 observation_shape = (input_depth * past_range,) + screen
+
+def transform_screen(data):
+    return rgb2gray(imresize(data, screen))[None, ...]
 
 def policy_loss(adventage=0., beta=0.01):
     from keras import backend as K
@@ -52,9 +55,11 @@ class LearningAgent(object):
         from keras.optimizers import RMSprop
         _, _, self.train_net, adventage = build_network(observation_shape,
                                                         action_space.num_discrete_space)
+        self.icm = build_icm_model(screen, (action_space.num_discrete_space,))
 
         self.train_net.compile(optimizer=RMSprop(epsilon=0.1, rho=0.99),
                                loss=[value_loss(), policy_loss(adventage, args.beta)])
+        self.icm.compile(optimizer="rmsprop", loss=[lambda y_true, y_pred: y_pred, "mse"])
 
         self.pol_loss = deque(maxlen=25)
         self.val_loss = deque(maxlen=25)
@@ -62,8 +67,9 @@ class LearningAgent(object):
         self.entropy = deque(maxlen=25)
         self.swap_freq = swap_freq
         self.swap_counter = self.swap_freq
-        self.unroll = np.arange(batch_size)
-        self.targets = np.zeros((batch_size, action_space.num_discrete_space))
+        self.batch_size = batch_size
+        self.unroll = np.arange(self.batch_size)
+        self.targets = np.zeros((self.batch_size, action_space.num_discrete_space))
         self.counter = 0
 
     def learn(self, last_observations, actions, rewards, learning_rate=0.001):
@@ -77,8 +83,21 @@ class LearningAgent(object):
         adventage = rewards - values.flatten()
         self.targets[self.unroll, :] = actions.astype(np.float32)
 
-        loss = self.train_net.train_on_batch([last_observations, adventage], [rewards, self.targets])
+        loss = self.train_net.train_on_batch([last_observations, adventage],
+                                             [rewards, self.targets])
+        loss_icm = self.icm.train_on_batch([last_observations[:, -2, ...],
+                                            last_observations[:, -1, ...],
+                                            actions],
+                                            [np.zeros((self.batch_size,)), actions])
         entropy = np.mean(-policy * np.log(policy + 0.00000001))
+        self.store_results(loss, entropy, values, loss_icm)
+        self.swap_counter -= frames
+        if self.swap_counter < 0:
+            self.swap_counter += self.swap_freq
+            return True
+        return False
+
+    def store_results(self, loss, entropy, values, loss_icm):
         self.pol_loss.append(loss[2])
         self.val_loss.append(loss[1])
         self.entropy.append(entropy)
@@ -87,25 +106,20 @@ class LearningAgent(object):
         print('\rFrames: %8d; Policy-Loss: %10.6f; Avg: %10.6f '
               '--- Value-Loss: %10.6f; Avg: %10.6f '
               '--- Entropy: %7.6f; Avg: %7.6f '
-              '--- V-value; Min: %6.3f; Max: %6.3f; Avg: %6.3f' % (
+              '--- V-value; Min: %6.3f; Max: %6.3f; Avg: %6.3f'
+              '--- ICM-Loss: %10.6f; Action-Loss: %10.6f' % (
                   self.counter,
                   loss[2], np.mean(self.pol_loss),
                   loss[1], np.mean(self.val_loss),
                   entropy, np.mean(self.entropy),
-                  min_val, max_val, avg_val), end='')
-
-        self.swap_counter -= frames
-        if self.swap_counter < 0:
-            self.swap_counter += self.swap_freq
-            return True
-        return False
-
+                  min_val, max_val, avg_val,
+                  loss_icm[1], loss_icm[2]), end='')
 
 def learn_proc(mem_queue, weight_dict):
     import os
     pid = os.getpid()
     os.environ['THEANO_FLAGS'] = 'floatX=float32,device=gpu,nvcc.fastmath=False,lib.cnmem=0.3,' + \
-                                 'compiledir=th_comp_learn'
+                                 'compiledir=th_comp_learn,optimizer=fast_compile'
     print(' %5d> Learning process' % (pid,))
     save_freq = args.save_freq
     learning_rate = args.learning_rate
@@ -122,6 +136,7 @@ def learn_proc(mem_queue, weight_dict):
     print(' %5d> Setting weights in dict' % (pid,))
     weight_dict['update'] = 0
     weight_dict['weights'] = agent.train_net.get_weights()
+    weight_dict['weights_icm'] = agent.icm.get_weights()
 
     last_obs = np.zeros((batch_size,) + observation_shape)
     actions = np.zeros((batch_size, env.action_space.num_discrete_space), dtype=np.int32)
@@ -139,6 +154,7 @@ def learn_proc(mem_queue, weight_dict):
             if updated:
                 # print(' %5d> Updating weights in dict' % (pid,))
                 weight_dict['weights'] = agent.train_net.get_weights()
+                weight_dict['weights_icm'] = agent.icm.get_weights()
                 weight_dict['update'] += 1
         save_counter -= 1
         if save_counter < 0:
@@ -147,14 +163,16 @@ def learn_proc(mem_queue, weight_dict):
 
 
 class ActingAgent(object):
-    def __init__(self, num_action, screen=(84, 84), n_step=8, discount=0.99):
+    def __init__(self, num_action, n_step=8, discount=0.99):
 
         self.value_net, self.policy_net, self.load_net, _ = build_network(observation_shape,
                                                                           num_action)
+        self.icm = build_icm_model(screen, (num_action,))
 
         self.value_net.compile(optimizer='rmsprop', loss='mse')
         self.policy_net.compile(optimizer='rmsprop', loss='mse')
         self.load_net.compile(optimizer='rmsprop', loss='mse', loss_weights=[0.5, 1.])  # dummy loss
+        self.icm.compile(optimizer="rmsprop", loss=[lambda y_true, y_pred: y_pred, "mse"])
 
         self.num_action = num_action
         self.observations = np.zeros(observation_shape)
@@ -199,11 +217,7 @@ class ActingAgent(object):
     def save_observation(self, observation):
         self.last_observations = self.observations[...]
         self.observations = np.roll(self.observations, -input_depth, axis=0)
-        self.observations[-input_depth:, ...] = self.transform_screen(observation)
-
-    def transform_screen(self, data):
-        return rgb2gray(imresize(data, screen))[None, ...]
-
+        self.observations[-input_depth:, ...] = transform_screen(observation)
 
 def generate_experience_proc(mem_queue, weight_dict, no):
     import os
@@ -224,6 +238,7 @@ def generate_experience_proc(mem_queue, weight_dict, no):
         while 'weights' not in weight_dict:
             time.sleep(0.1)
         agent.load_net.set_weights(weight_dict['weights'])
+        agent.icm.set_weights(weight_dict['weights_icm'])
         print(' %5d> Loaded weights from dict' % (pid,))
 
     best_score = 0
@@ -235,6 +250,7 @@ def generate_experience_proc(mem_queue, weight_dict, no):
         episode_reward = 0
         op_last, op_count = np.zeros(env.action_space.num_discrete_space), 0
         observation = env.reset()
+        obs_last = observation.copy()
         agent.init_episode(observation)
 
         while not done:
@@ -242,12 +258,17 @@ def generate_experience_proc(mem_queue, weight_dict, no):
             action = agent.choose_action()
             observation, reward, done, _ = env.step(action)
             #env.render()
-            episode_reward += reward
+            r_in, _ = agent.icm.predict([transform_screen(obs_last),
+                                         transform_screen(observation),
+                                         np.array([action])])
+            #episode_reward += reward
+            episode_reward -= r_in[0]
             best_score = max(best_score, episode_reward)
             agent.sars_data(action, reward, observation, done, mem_queue)
             op_count = 0 if (op_last != action).any() else op_count + 1
             done = done or op_count >= 100
             op_last = action
+            obs_last = observation.copy()
             if frames % 2000 == 0:
                 print(' %5d> Best: %4d; Avg: %6.2f; Max: %4d' % (
                       pid, best_score, np.mean(avg_score), np.max(avg_score)))
@@ -257,6 +278,7 @@ def generate_experience_proc(mem_queue, weight_dict, no):
                     last_update = update
                     # print(' %5d> Getting weights from dict' % (pid,))
                     agent.load_net.set_weights(weight_dict['weights'])
+                    agent.icm.set_weights(weight_dict['weights_icm'])
         avg_score.append(episode_reward)
 
 def init_worker():
