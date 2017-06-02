@@ -28,6 +28,7 @@ parser.add_argument('--queue_size', default=256, help='Size of queue holding age
 parser.add_argument('--n_step', default=5, help='Number of steps', dest='n_step', type=int)
 parser.add_argument('--reward_scale', default=1., dest='reward_scale', type=float)
 parser.add_argument('--beta', default=0.01, dest='beta', type=float)
+parser.add_argument('--with_reward', dest='with_reward', action='store_true')
 args = parser.parse_args()
 screen = (42, 42)
 input_depth = 1
@@ -206,8 +207,8 @@ class ActingAgent(object):
                 mem_queue.put((self.n_step_data[i][0], self.n_step_data[i][1], r))
             self.reset()
 
-    def choose_action(self):
-        if np.random.rand(1) < 0.1:
+    def choose_action(self, eps=0.1):
+        if np.random.rand(1) < eps:
             action = np.random.rand(self.num_action)
         else:
             action = self.policy_net.predict(self.observations[None, ...])[0]
@@ -243,8 +244,8 @@ def generate_experience_proc(mem_queue, weight_dict, no):
 
     best_score = 0
     avg_score = deque([0], maxlen=25)
-
     last_update = 0
+    eta = 1.0 # parameter for intrinsic reward
     while True:
         done = False
         episode_reward = 0
@@ -261,11 +262,13 @@ def generate_experience_proc(mem_queue, weight_dict, no):
             r_in, _ = agent.icm.predict([transform_screen(obs_last),
                                          transform_screen(observation),
                                          np.array([action])])
-            #episode_reward += reward
-            episode_reward += r_in[0]
+            if args.with_reward:
+                total_reward = reward + eta * r_in[0]
+            else:
+                total_reward = eta * r_in[0]
+            episode_reward += total_reward
             best_score = max(best_score, episode_reward)
-            #agent.sars_data(action, reward, observation, done, mem_queue)
-            agent.sars_data(action, r_in[0], observation, done, mem_queue)
+            agent.sars_data(action, total_reward, observation, done, mem_queue)
             op_count = 0 if (op_last != action).any() else op_count + 1
             done = done or op_count >= 100
             op_last = action
