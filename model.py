@@ -21,6 +21,7 @@ def build_network(input_shape, output_shape):
 
     value = Dense(256, activation='relu')(h)
     value = Dense(1, activation='linear', name='value')(value)
+    #policy = LSTM(output_shape, activation='sigmoid', name='policy')(h)
     policy = Dense(output_shape, activation='sigmoid', name='policy')(h)
 
     value_network = Model(input=state, output=value)

@@ -9,7 +9,7 @@ import h5py
 import argparse
 import ppaquette_gym_super_mario
 from model import build_network
-from noreward_models import build_icm_model
+from noreward_models import build_icm_model, get_reward_intrinsic
 
 parser = argparse.ArgumentParser(description='Training model')
 parser.add_argument('--game', default='ppaquette/SuperMarioBros-1-1-v0', help='OpenAI gym environment name', dest='game', type=str)
@@ -60,7 +60,7 @@ class LearningAgent(object):
 
         self.train_net.compile(optimizer=RMSprop(epsilon=0.1, rho=0.99),
                                loss=[value_loss(), policy_loss(adventage, args.beta)])
-        self.icm.compile(optimizer="rmsprop", loss=[lambda y_true, y_pred: y_pred, "mse"])
+        self.icm.compile(optimizer="rmsprop", loss=lambda y_true, y_pred: y_pred)
 
         self.pol_loss = deque(maxlen=25)
         self.val_loss = deque(maxlen=25)
@@ -89,8 +89,8 @@ class LearningAgent(object):
         loss_icm = self.icm.train_on_batch([last_observations[:, -2, ...],
                                             last_observations[:, -1, ...],
                                             actions],
-                                            [np.zeros((self.batch_size,)), actions])
-        entropy = np.mean(-policy * np.log(policy + 0.00000001))
+                                            np.zeros((self.batch_size,)))
+        entropy = np.mean(-policy * np.log(policy + 1e-8))
         self.store_results(loss, entropy, values, loss_icm)
         self.swap_counter -= frames
         if self.swap_counter < 0:
@@ -108,13 +108,13 @@ class LearningAgent(object):
               '--- Value-Loss: %10.6f; Avg: %10.6f '
               '--- Entropy: %7.6f; Avg: %7.6f '
               '--- V-value; Min: %6.3f; Max: %6.3f; Avg: %6.3f'
-              '--- ICM-Loss: %10.6f; Action-Loss: %10.6f' % (
+              '--- ICM-Loss: %10.6f' % (
                   self.counter,
                   loss[2], np.mean(self.pol_loss),
                   loss[1], np.mean(self.val_loss),
                   entropy, np.mean(self.entropy),
                   min_val, max_val, avg_val,
-                  loss_icm[1], loss_icm[2]), end='')
+                  loss_icm), end='')
 
 def learn_proc(mem_queue, weight_dict):
     import os
@@ -173,7 +173,7 @@ class ActingAgent(object):
         self.value_net.compile(optimizer='rmsprop', loss='mse')
         self.policy_net.compile(optimizer='rmsprop', loss='mse')
         self.load_net.compile(optimizer='rmsprop', loss='mse', loss_weights=[0.5, 1.])  # dummy loss
-        self.icm.compile(optimizer="rmsprop", loss=[lambda y_true, y_pred: y_pred, "mse"])
+        self.icm.compile(optimizer="rmsprop", loss=lambda y_true, y_pred: y_pred)
 
         self.num_action = num_action
         self.observations = np.zeros(observation_shape)
@@ -235,7 +235,8 @@ def generate_experience_proc(mem_queue, weight_dict, no):
 
     if frames > 0:
         print(' %5d> Loaded weights from file' % (pid,))
-        agent.load_net.load_weights('model-%s-%d.h5' % (args.game, frames))
+        agent.load_net.load_weights('model-%s-%d.h5' % (args.game.split("/")[-1], frames))
+        agent.icm.load_weights('icm_model-%s-%d.h5' % (args.game.split("/")[-1], frames))
     else:
         import time
         while 'weights' not in weight_dict:
@@ -258,12 +259,12 @@ def generate_experience_proc(mem_queue, weight_dict, no):
 
         while not done:
             frames += 1
-            action = agent.choose_action(eps = 1.0 / (frames / 1000.0 + 2.0))
+            action = agent.choose_action(eps = 1.0 / (frames / 10000.0 + 2.0))
             observation, reward, done, _ = env.step(action)
             #env.render()
-            r_in, _ = agent.icm.predict([transform_screen(obs_last),
-                                         transform_screen(observation),
-                                         np.array([action])])
+            r_in = get_reward_intrinsic(agent.icm, [transform_screen(obs_last),
+                                                    transform_screen(observation),
+                                                    np.array([action])])
             if args.with_reward:
                 total_reward = reward + eta * r_in[0]
             else:
