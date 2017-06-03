@@ -8,8 +8,7 @@ import numpy as np
 import h5py
 import argparse
 import ppaquette_gym_super_mario
-from model import build_network
-from noreward_models import build_icm_model, get_reward_intrinsic
+from models import build_network, build_icm_model, get_reward_intrinsic
 
 parser = argparse.ArgumentParser(description='Training model')
 parser.add_argument('--game', default='ppaquette/SuperMarioBros-1-1-v0', help='OpenAI gym environment name', dest='game', type=str)
