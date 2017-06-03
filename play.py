@@ -40,7 +40,7 @@ def main():
         print('Game #%8d; ' % (game,), end='')
         while not done:
             env.render()
-            action = agent.choose_action(observation)
+            action = agent.choose_action(observation, eps=0.0)
             observation, reward, done, _ = env.step(action)
             episode_reward += reward
             if action == 0:

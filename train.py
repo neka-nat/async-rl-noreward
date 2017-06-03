@@ -160,8 +160,8 @@ def learn_proc(mem_queue, weight_dict):
         save_counter -= 1
         if save_counter < 0:
             save_counter += save_freq
-            agent.train_net.save_weights('model-%s-%d.h5' % (args.game, agent.counter,), overwrite=True)
-
+            agent.train_net.save_weights('model-%s-%d.h5' % (args.game.split("/")[-1], agent.counter,), overwrite=True)
+            agent.icm.save_weights('icm_model-%s-%d.h5' % (args.game.split("/")[-1], agent.counter,), overwrite=True)
 
 class ActingAgent(object):
     def __init__(self, num_action, n_step=8, discount=0.99):
@@ -207,11 +207,13 @@ class ActingAgent(object):
                 mem_queue.put((self.n_step_data[i][0], self.n_step_data[i][1], r))
             self.reset()
 
-    def choose_action(self, eps=0.1):
+    def choose_action(self, observation=None, eps=0.1):
         if np.random.rand(1) < eps:
             action = np.random.rand(self.num_action)
-        else:
+        elif observation is None:
             action = self.policy_net.predict(self.observations[None, ...])[0]
+        else:
+            action = self.policy_net.predict([observation])[0]
         action = np.round(action)
         return action.astype(np.int32)
 
@@ -256,7 +258,7 @@ def generate_experience_proc(mem_queue, weight_dict, no):
 
         while not done:
             frames += 1
-            action = agent.choose_action()
+            action = agent.choose_action(eps = 1.0 / (frames / 1000.0 + 2.0))
             observation, reward, done, _ = env.step(action)
             #env.render()
             r_in, _ = agent.icm.predict([transform_screen(obs_last),
