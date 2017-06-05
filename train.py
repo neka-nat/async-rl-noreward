@@ -15,7 +15,7 @@ parser.add_argument('--game', default='ppaquette/SuperMarioBros-1-1-v0', help='O
 parser.add_argument('--processes', default=4, help='Number of processes that generate experience for agent',
                     dest='processes', type=int)
 parser.add_argument('--lr', default=0.001, help='Learning rate', dest='learning_rate', type=float)
-parser.add_argument('--steps', default=8000000, help='Number of frames to decay learning rate', dest='steps', type=int)
+parser.add_argument('--steps', default=1000000, help='Number of frames to decay learning rate', dest='steps', type=int)
 parser.add_argument('--batch_size', default=20, help='Batch size to use during training', dest='batch_size', type=int)
 parser.add_argument('--swap_freq', default=100, help='Number of frames before swapping network weights',
                     dest='swap_freq', type=int)
@@ -64,7 +64,6 @@ class LearningAgent(object):
         self.pol_loss = deque(maxlen=25)
         self.val_loss = deque(maxlen=25)
         self.values = deque(maxlen=25)
-        self.entropy = deque(maxlen=25)
         self.swap_freq = swap_freq
         self.swap_counter = self.swap_freq
         self.batch_size = batch_size
@@ -89,29 +88,25 @@ class LearningAgent(object):
                                             last_observations[:, -1, ...],
                                             actions],
                                             np.zeros((self.batch_size,)))
-        entropy = np.mean(-policy * np.log(policy + 1e-8))
-        self.store_results(loss, entropy, values, loss_icm)
+        self.store_results(loss, values, loss_icm)
         self.swap_counter -= frames
         if self.swap_counter < 0:
             self.swap_counter += self.swap_freq
             return True
         return False
 
-    def store_results(self, loss, entropy, values, loss_icm):
+    def store_results(self, loss, values, loss_icm):
         self.pol_loss.append(loss[2])
         self.val_loss.append(loss[1])
-        self.entropy.append(entropy)
         self.values.append(np.mean(values))
         min_val, max_val, avg_val = min(self.values), max(self.values), np.mean(self.values)
         print('\rFrames: %8d; Policy-Loss: %10.6f; Avg: %10.6f '
               '--- Value-Loss: %10.6f; Avg: %10.6f '
-              '--- Entropy: %7.6f; Avg: %7.6f '
               '--- V-value; Min: %6.3f; Max: %6.3f; Avg: %6.3f'
-              '--- ICM-Loss: %10.6f' % (
+              '--- ICM-Loss: %f' % (
                   self.counter,
                   loss[2], np.mean(self.pol_loss),
                   loss[1], np.mean(self.val_loss),
-                  entropy, np.mean(self.entropy),
                   min_val, max_val, avg_val,
                   loss_icm), end='')
 
@@ -149,7 +144,7 @@ def learn_proc(mem_queue, weight_dict):
         last_obs[idx, ...], actions[idx, ...], rewards[idx] = mem_queue.get()
         idx = (idx + 1) % batch_size
         if idx == 0:
-            lr = max(0.00000001, (steps - agent.counter) / steps * learning_rate)
+            lr = max(1.0e-8, (steps - agent.counter) / steps * learning_rate)
             updated = agent.learn(last_obs, actions, rewards, learning_rate=lr)
             if updated:
                 # print(' %5d> Updating weights in dict' % (pid,))
@@ -251,7 +246,7 @@ def generate_experience_proc(mem_queue, weight_dict, no):
     while True:
         done = False
         episode_reward = 0
-        op_last, op_count = np.zeros(env.action_space.num_discrete_space), 0
+        op_last = np.zeros(env.action_space.num_discrete_space)
         observation = env.reset()
         obs_last = observation.copy()
         agent.init_episode(observation)
@@ -271,8 +266,6 @@ def generate_experience_proc(mem_queue, weight_dict, no):
             episode_reward += total_reward
             best_score = max(best_score, episode_reward)
             agent.sars_data(action, total_reward, observation, done, mem_queue)
-            op_count = 0 if (op_last != action).any() else op_count + 1
-            done = done or op_count >= 100
             op_last = action
             obs_last = observation.copy()
             if frames % 2000 == 0:
