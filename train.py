@@ -37,10 +37,10 @@ observation_shape = (input_depth * past_range,) + screen
 def transform_screen(data):
     return rgb2gray(imresize(data, screen))[None, ...]
 
-def policy_loss(adventage=0., beta=0.01):
+def policy_loss(advantage=0., beta=0.01):
     from keras import backend as K
     def loss(y_true, y_pred):
-        return -K.sum(K.log(K.sum(y_true * y_pred, axis=-1) + K.epsilon()) * K.flatten(adventage)) + \
+        return -K.sum(K.log(K.sum(y_true * y_pred, axis=-1) + K.epsilon()) * K.flatten(advantage)) + \
                beta * K.sum(y_pred * K.log(y_pred + K.epsilon()))
     return loss
 
@@ -53,12 +53,12 @@ def value_loss():
 class LearningAgent(object):
     def __init__(self, action_space, batch_size=32, swap_freq=200):
         from keras.optimizers import RMSprop
-        _, _, self.train_net, adventage = build_network(observation_shape,
+        _, _, self.train_net, advantage = build_network(observation_shape,
                                                         action_space.num_discrete_space)
         self.icm = build_icm_model(screen, (action_space.num_discrete_space,))
 
         self.train_net.compile(optimizer=RMSprop(epsilon=0.1, rho=0.99),
-                               loss=[value_loss(), policy_loss(adventage, args.beta)])
+                               loss=[value_loss(), policy_loss(advantage, args.beta)])
         self.icm.compile(optimizer="rmsprop", loss=lambda y_true, y_pred: y_pred)
 
         self.pol_loss = deque(maxlen=25)
@@ -79,10 +79,10 @@ class LearningAgent(object):
         values, policy = self.train_net.predict([last_observations, self.unroll])
 
         self.targets.fill(0.)
-        adventage = rewards - values.flatten()
+        advantage = rewards - values.flatten()
         self.targets[self.unroll, :] = actions.astype(np.float32)
 
-        loss = self.train_net.train_on_batch([last_observations, adventage],
+        loss = self.train_net.train_on_batch([last_observations, advantage],
                                              [rewards, self.targets])
         loss_icm = self.icm.train_on_batch([last_observations[:, -2, ...],
                                             last_observations[:, -1, ...],

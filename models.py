@@ -28,10 +28,10 @@ def build_network(input_shape, output_shape):
     value_network = Model(input=state, output=value)
     policy_network = Model(input=state, output=policy)
 
-    adventage = Input(shape=(1,))
-    train_network = Model(input=[state, adventage], output=[value, policy])
+    advantage = Input(shape=(1,))
+    train_network = Model(input=[state, advantage], output=[value, policy])
 
-    return value_network, policy_network, train_network, adventage
+    return value_network, policy_network, train_network, advantage
 
 def build_feature_map(input_shape):
     model = Sequential()
