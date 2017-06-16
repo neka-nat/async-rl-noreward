@@ -86,8 +86,9 @@ class LearningAgent(object):
                                              [rewards, self.targets])
         loss_icm = self.icm.train_on_batch([last_observations[:, -2, ...],
                                             last_observations[:, -1, ...],
-                                            actions],
-                                            np.zeros((self.batch_size,)))
+                                            actions,
+                                            rewards.reshape((-1, 1))],
+                                           np.zeros((self.batch_size,)))
         self.store_results(loss, values, loss_icm)
         self.swap_counter -= frames
         if self.swap_counter < 0:

@@ -72,7 +72,7 @@ def forward_model(output_dim=288):
         return h
     return func
 
-def build_icm_model(state_shape, action_shape, beta=0.01):
+def build_icm_model(state_shape, action_shape, lmd=1.0, beta=0.01):
     s_t0 = Input(shape=state_shape, name="state0")
     s_t1 = Input(shape=state_shape, name="state1")
     a_t = Input(shape=action_shape, name="action")
@@ -86,8 +86,10 @@ def build_icm_model(state_shape, action_shape, beta=0.01):
                  output_shape=(1,), name="reward_intrinsic")
     l_i = merge([a_t, act_hat], mode=lambda x: -K.sum(x[0] * K.log(x[1] + K.epsilon()), axis=-1),
                 output_shape=(1,))
-    loss = merge([r_in, l_i], mode=lambda x: beta * x[0] + (1.0 - beta) * x[1], output_shape=(1,))
-    return Model([s_t0, s_t1, a_t], loss)
+    loss0 = merge([r_in, l_i], mode=lambda x: beta * x[0] + (1.0 - beta) * x[1], output_shape=(1,))
+    rwd = Input(shape=(1,))
+    loss = merge([rwd, loss0], mode=lambda x: (-lmd * x[0].T + x[1]).T, output_shape=(1,))
+    return Model([s_t0, s_t1, a_t, rwd], loss)
 
 def get_reward_intrinsic(model, x):
     return K.function([model.get_layer("state0").input,
